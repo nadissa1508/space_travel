@@ -995,3 +995,30 @@ pub fn fragment_shader(fragment: &Fragment, uniforms: &Uniforms) -> Vector3 {
         ShaderType::Moon => shader_moon(fragment, time),
     }
 }
+
+// Shader de skybox
+fn shader_skybox(fragment: &Fragment, time: f32) -> Vector3 {
+    let pos = fragment.world_position;
+    
+    // Estrellas procedurales usando hash
+    let star_density = 200.0;
+    let star_pos = Vector3::new(
+        pos.x * star_density,
+        pos.y * star_density,
+        pos.z * star_density,
+    );
+    
+    let star_value = hash_v3(star_pos);
+    
+    // Solo top 0.5% se vuelven estrellas
+    if star_value > 0.995 {
+        let brightness = (star_value - 0.995) / 0.005;
+        let twinkle = ((time * 3.0 + star_value * 100.0).sin() * 0.5 + 0.5) * 0.3 + 0.7;
+        return Vector3::new(1.0, 1.0, 1.0) * brightness * twinkle;
+    }
+    
+    // Fondo azul oscuro
+    Vector3::new(0.0, 0.0, 0.05)
+}
+
+// Renderizar skybox como esfera gigante invertida
