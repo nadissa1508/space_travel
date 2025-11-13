@@ -10,6 +10,7 @@ mod matrix;
 mod obj;
 mod orbit;
 mod shaders;
+mod skybox;
 mod solar_system;
 mod triangle;
 mod vertex;
@@ -18,6 +19,7 @@ use crate::camera::Camera;
 use crate::light::Light;
 use crate::line::draw_orbit_circle;
 use crate::matrix::{create_model_matrix, create_projection_matrix, create_viewport_matrix};
+use crate::skybox::Skybox;
 use crate::solar_system::SolarSystem;
 use framebuffer::Framebuffer;
 use obj::Obj;
@@ -109,6 +111,10 @@ fn main() {
     // Cargar esfera base
     let obj = Obj::load("assets/models/sphere.obj").expect("Failed to load sphere.obj");
     let vertex_array = obj.get_vertex_array();
+
+    // Crear skybox
+    let skybox = Skybox::new();
+    let skybox_vertices = skybox.get_vertex_array();
 
     let mut elapsed_time = 0.0f32;
     let mut auto_rotate = true;
@@ -226,6 +232,25 @@ fn main() {
         let projection_matrix = create_projection_matrix(fov_y, aspect, near, far);
         let viewport_matrix =
             create_viewport_matrix(0.0, 0.0, window_width as f32, window_height as f32);
+
+        // === RENDERIZAR SKYBOX ===
+        // El skybox se renderiza primero como fondo
+        let skybox_model = create_model_matrix(
+            camera.target,  // Skybox centered on camera target
+            1.0,
+            Vector3::new(0.0, 0.0, 0.0)
+        );
+
+        let skybox_uniforms = Uniforms {
+            model_matrix: skybox_model,
+            view_matrix,
+            projection_matrix,
+            viewport_matrix,
+            time: elapsed_time,
+            shader_type: ShaderType::Skybox,
+        };
+
+        render(&mut framebuffer, &skybox_uniforms, skybox_vertices, &light);
 
         // En el render loop, antes de renderizar los planetas:
         if solar_system.orbit_lines_enabled {

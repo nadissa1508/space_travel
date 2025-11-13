@@ -14,6 +14,7 @@ pub enum ShaderType {
     SolarHeart, // Estrella con patrón de corazón (Lab 5)
     Rings,      // Anillos planetarios
     Moon,       // Luna
+    Skybox,     // Skybox de fondo
 }
 
 // --- Shader helper functions (ported from GLSL) ---
@@ -993,32 +994,58 @@ pub fn fragment_shader(fragment: &Fragment, uniforms: &Uniforms) -> Vector3 {
         ShaderType::SolarHeart => shader_solar_heart(fragment, time),
         ShaderType::Rings => shader_rings(fragment, time),
         ShaderType::Moon => shader_moon(fragment, time),
+        ShaderType::Skybox => shader_skybox(fragment, time),
     }
 }
 
-// Shader de skybox
+// Shader de skybox - Crea un campo de estrellas visible
 fn shader_skybox(fragment: &Fragment, time: f32) -> Vector3 {
     let pos = fragment.world_position;
     
-    // Estrellas procedurales usando hash
-    let star_density = 200.0;
-    let star_pos = Vector3::new(
-        pos.x * star_density,
-        pos.y * star_density,
-        pos.z * star_density,
-    );
+    // Normalizar coordenadas basadas en la posición del mundo
+    let u = (pos.x / 100.0 + 0.5).fract();
+    let v = (pos.y / 100.0 + 0.5).fract();
+    let w = (pos.z / 100.0 + 0.5).fract();
     
-    let star_value = hash_v3(star_pos);
+    // Crear un patrón de estrellas 3D
+    let star_density = 20.0;
+    let star_x = (pos.x * star_density).floor();
+    let star_y = (pos.y * star_density).floor();
+    let star_z = (pos.z * star_density).floor();
     
-    // Solo top 0.5% se vuelven estrellas
-    if star_value > 0.995 {
-        let brightness = (star_value - 0.995) / 0.005;
-        let twinkle = ((time * 3.0 + star_value * 100.0).sin() * 0.5 + 0.5) * 0.3 + 0.7;
-        return Vector3::new(1.0, 1.0, 1.0) * brightness * twinkle;
+    // Hash 3D para determinar estrellas
+    let hash = ((star_x * 12.9898 + star_y * 78.233 + star_z * 45.164).sin() * 43758.5453).fract();
+    
+    // Crear estrellas brillantes
+    if hash > 0.985 {
+        let brightness = (hash - 0.985) / 0.015;
+        let twinkle = ((time * 3.0 + hash * 20.0).sin() * 0.5 + 0.5) * 0.4 + 0.6;
+        
+        // Colores variados para las estrellas
+        let star_color = if hash > 0.995 {
+            Vector3::new(0.6, 0.8, 1.0) // Azul brillante
+        } else if hash > 0.992 {
+            Vector3::new(1.0, 0.9, 0.6) // Amarillo
+        } else if hash > 0.989 {
+            Vector3::new(1.0, 0.7, 0.7) // Rojo
+        } else {
+            Vector3::new(1.0, 1.0, 1.0) // Blanco
+        };
+        
+        return star_color * brightness * twinkle * 1.5;
     }
     
-    // Fondo azul oscuro
-    Vector3::new(0.0, 0.0, 0.05)
+    // Nebulosa sutil usando gradientes
+    let nebula_r = ((u * 5.0 + time * 0.1).sin() * 0.5 + 0.5) * 0.03;
+    let nebula_g = ((v * 3.0 - time * 0.08).sin() * 0.5 + 0.5) * 0.02;
+    let nebula_b = ((w * 4.0 + time * 0.05).sin() * 0.5 + 0.5) * 0.05;
+    
+    // Fondo oscuro del espacio con toque de nebulosa
+    Vector3::new(
+        nebula_r,
+        nebula_g, 
+        0.02 + nebula_b
+    )
 }
 
 // Renderizar skybox como esfera gigante invertida
