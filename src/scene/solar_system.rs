@@ -16,7 +16,7 @@ impl SolarSystem {
 
         // Sol (estrella central) - Amarillo brillante
         bodies.push(CelestialBody::new(
-            "Sol",
+            "Solar heart",
             2.5,                    // Radio grande
             (1.0, 0.9, 0.3),        // Amarillo dorado
             0.0,                    // Sin órbita (centro)
@@ -28,7 +28,7 @@ impl SolarSystem {
 
         // Planeta 1: Ignis - Planeta volcánico de lava
         bodies.push(CelestialBody::new(
-            "Ignis",
+            "Lava",
             0.4,
             (0.7, 0.4, 0.3),        // Rojizo
             5.0,                    // Órbita cercana
@@ -40,7 +40,7 @@ impl SolarSystem {
 
         // Planeta 2: Terra - Planeta rocoso
         bodies.push(CelestialBody::new(
-            "Terra",
+            "Rocky",
             0.8,
             (0.2, 0.5, 0.8),        // Azulado
             8.0,
@@ -52,7 +52,7 @@ impl SolarSystem {
 
         // Planeta 3: Xenon - Planeta alien holográfico
         bodies.push(CelestialBody::new(
-            "Xenon",
+            "Alien",
             0.6,
             (0.5, 0.1, 0.6),        // Púrpura base
             12.0,
@@ -64,7 +64,7 @@ impl SolarSystem {
 
         // Planeta 4: Magnus - Gigante gaseoso
         bodies.push(CelestialBody::new(
-            "Magnus",
+            "Gas Giant",
             1.5,
             (0.8, 0.7, 0.5),        // Naranja/marrón
             18.0,
@@ -76,7 +76,7 @@ impl SolarSystem {
 
         // Planeta 5: Glacius - Planeta de hielo
         bodies.push(CelestialBody::new(
-            "Glacius",
+            "Ice",
             1.0,
             (0.2, 0.3, 0.7),        // Azul oscuro
             25.0,
