@@ -1,421 +1,352 @@
-// main.rs - Sistema Multi-Planeta con Shaders Procedurales
-
+mod math;
+mod renderer;
 mod camera;
-mod celestial_body;
-mod fragment;
-mod framebuffer;
-mod light;
-mod line;
-mod matrix;
-mod obj;
-mod orbit;
+mod scene;
+mod threading;
 mod shaders;
-mod skybox;
-mod solar_system;
-mod triangle;
-mod vertex;
 
-use crate::camera::Camera;
-use crate::light::Light;
-use crate::line::draw_orbit_circle;
-use crate::matrix::{create_model_matrix, create_projection_matrix, create_viewport_matrix};
-use crate::skybox::Skybox;
-use crate::solar_system::SolarSystem;
-use framebuffer::Framebuffer;
-use obj::Obj;
-use raylib::prelude::*;
-use shaders::{fragment_shader, vertex_shader, ShaderType};
-use std::f32::consts::PI;
-use triangle::triangle;
-use vertex::Vertex;
+use minifb::{Key, Window, WindowOptions};
+use std::time::Instant;
 
-pub struct Uniforms {
-    pub model_matrix: Matrix,
-    pub view_matrix: Matrix,
-    pub projection_matrix: Matrix,
-    pub viewport_matrix: Matrix,
-    pub time: f32,
-    pub shader_type: ShaderType,
-}
+use math::{Vec3, Mat4};
+use renderer::{Framebuffer, draw_line, rgb_to_u32, render_skybox};
+use camera::Camera;
+use scene::SolarSystem;
+use shaders::{ShaderType, FragmentData, apply_shader};
 
-fn render(
-    framebuffer: &mut Framebuffer,
-    uniforms: &Uniforms,
-    vertex_array: &[Vertex],
-    light: &Light,
-) {
-    let mut transformed_vertices = Vec::with_capacity(vertex_array.len());
-    for vertex in vertex_array {
-        let transformed = vertex_shader(vertex, uniforms);
-        transformed_vertices.push(transformed);
-    }
-
-    let mut triangles = Vec::new();
-    for i in (0..transformed_vertices.len()).step_by(3) {
-        if i + 2 < transformed_vertices.len() {
-            triangles.push([
-                transformed_vertices[i].clone(),
-                transformed_vertices[i + 1].clone(),
-                transformed_vertices[i + 2].clone(),
-            ]);
-        }
-    }
-
-    let mut fragments = Vec::new();
-    for tri in &triangles {
-        fragments.extend(triangle(&tri[0], &tri[1], &tri[2], light));
-    }
-
-    for fragment in fragments {
-        let final_color = fragment_shader(&fragment, uniforms);
-        framebuffer.point(
-            fragment.position.x as i32,
-            fragment.position.y as i32,
-            final_color,
-            fragment.depth,
-        );
-    }
-}
+const WIDTH: usize = 800;
+const HEIGHT: usize = 600;
 
 fn main() {
-    let window_width = 800;
-    let window_height = 600;
+    // Crear ventana
+    let mut window = Window::new(
+        "Space Travel - Sistema Solar",
+        WIDTH,
+        HEIGHT,
+        WindowOptions {
+            resize: false,
+            ..WindowOptions::default()
+        },
+    )
+    .expect("No se pudo crear la ventana");
 
-    let (mut window, thread) = raylib::init()
-        .size(window_width, window_height)
-        .title("Laboratorio 4 - Shaders Planetarios")
-        .log_level(TraceLogLevel::LOG_WARNING)
-        .build();
+    // Limitar a ~60 FPS
+    window.limit_update_rate(Some(std::time::Duration::from_micros(16600)));
 
-    window.set_target_fps(60);
-    let mut framebuffer = Framebuffer::new(window_width as u32, window_height as u32);
-    framebuffer.set_background_color(Vector3::new(0.0, 0.0, 0.05)); // Espacio oscuro
-
-    framebuffer.init_texture(&mut window, &thread);
-
-    // Camera setup - positioned to see the whole solar system
-    let camera_position = Vector3::new(0.0, 20.0, 20.0);  // High up and far to see all planets
-    let camera_target = Vector3::new(0.0, 0.0, 0.0);
-    let camera_up = Vector3::new(0.0, 1.0, 0.0);
-    let mut camera = Camera::new(camera_position, camera_target, camera_up);
-
-    // Projection setup
-    let fov_y = PI / 3.0;
-    let aspect = window_width as f32 / window_height as f32;
-    let near = 0.1;
-    let far = 100.0;
-
-    // Light setup
-    let light = Light::new(Vector3::new(10.0, 10.0, 10.0));
-
-    // Cargar esfera base
-    let obj = Obj::load("assets/models/sphere.obj").expect("Failed to load sphere.obj");
-    let vertex_array = obj.get_vertex_array();
-
-    // Crear skybox
-    let skybox = Skybox::new();
-    let skybox_vertices = skybox.get_vertex_array();
-
-    let mut elapsed_time = 0.0f32;
-    let mut auto_rotate = true;
-    let mut rotation_y = 0.0f32;
-
-    // Sistema multi-objeto (planeta + anillo + luna)
-    let mut show_rings = false;
-    let mut show_moon = false;
-
-    // Sistema solar
+    // Inicializar componentes
+    let mut framebuffer = Framebuffer::new(WIDTH, HEIGHT);
+    let mut camera = Camera::new(WIDTH as f32 / HEIGHT as f32);
     let mut solar_system = SolarSystem::new();
 
-    // Debug: print planet positions
-    println!("=== SISTEMA SOLAR INICIALIZADO ===");
-    for body in &solar_system.bodies {
-        let pos = body.get_world_position();
-        println!("{}: orbit_radius={}, orbit_angle={}, position=({:.2}, {:.2}, {:.2})", 
-            body.name, body.orbit_radius, body.orbit_angle, pos.x, pos.y, pos.z);
-    }
+    // Estado
+    let mut last_time = Instant::now();
+    let mut current_target: usize = 0; // Índice del planeta que sigue la cámara
+    let mut total_time: f32 = 0.0; // Tiempo total para animaciones de shaders
 
-    println!("=== CONTROLES ===");
-    println!("1: Warp a Mercurio");
-    println!("2: Warp a Venus");
-    println!("3: Warp a Tierra");
-    println!("4: Warp a Marte");
-    println!("5: Warp a Júpiter (con anillos)");
-    println!("6: Warp a Xenos (planeta alien con 2 lunas)");
-    println!("R: Toggle anillos");
-    println!("M: Toggle luna");
-    println!("SPACE: Pausar rotación");
-    println!("WASD: Rotar cámara");
-    println!("Flechas: Zoom y pan");
+    // Posición inicial de la cámara
+    camera.look_at_target(Vec3::zero());
+    camera.set_distance(35.0); // Increased to see Glacius (orbit 25.0) better
 
-    while !window.window_should_close() {
-        let delta_time = window.get_frame_time();
-        elapsed_time += delta_time;
+    println!("Controles:");
+    println!("  W/S - Acercar/Alejar cámara");
+    println!("  A/D - Rotar cámara alrededor del objetivo");
+    println!("  1-6 - Cambiar a planeta (1=Sol, 2-6=Planetas)");
+    println!("  ESC - Salir");
 
-        // Input para cambiar shaders
-        if window.is_key_pressed(KeyboardKey::KEY_ONE) {
-            if let Some(body) = solar_system.get_body_by_name("Mercurio") {
-                let body_pos = body.get_world_position();
-                let warp_pos = Vector3::new(body_pos.x, body_pos.y + 1.0, body_pos.z + 3.0);
-                camera.warp_to(warp_pos, 1.5); // 1.5 segundos de animación
-            }
-        }
-        if window.is_key_pressed(KeyboardKey::KEY_TWO) {
-            if let Some(body) = solar_system.get_body_by_name("Venus") {
-                let body_pos = body.get_world_position();
-                let warp_pos = Vector3::new(body_pos.x, body_pos.y + 1.0, body_pos.z + 3.0);
-                camera.warp_to(warp_pos, 1.5);
-            }
-        }
-        if window.is_key_pressed(KeyboardKey::KEY_THREE) {
-            if let Some(body) = solar_system.get_body_by_name("Tierra") {
-                let body_pos = body.get_world_position();
-                let warp_pos = Vector3::new(body_pos.x, body_pos.y + 1.5, body_pos.z + 3.5);
-                camera.warp_to(warp_pos, 1.5);
-                println!("Warping a Tierra (con Luna)");
-            }
-        }
-        if window.is_key_pressed(KeyboardKey::KEY_FOUR) {
-            if let Some(body) = solar_system.get_body_by_name("Marte") {
-                let body_pos = body.get_world_position();
-                let warp_pos = Vector3::new(body_pos.x, body_pos.y + 1.5, body_pos.z + 3.0);
-                camera.warp_to(warp_pos, 1.5);
-                println!("Warping a Marte (con luna Fobos)");
-            }
-        }
-        if window.is_key_pressed(KeyboardKey::KEY_FIVE) {
-            if let Some(body) = solar_system.get_body_by_name("Júpiter") {
-                let body_pos = body.get_world_position();
-                let warp_pos = Vector3::new(body_pos.x, body_pos.y + 2.5, body_pos.z + 5.0);
-                camera.warp_to(warp_pos, 1.5);
-                println!("Warping a Júpiter (con anillos)");
-            }
-        }
-        if window.is_key_pressed(KeyboardKey::KEY_SIX) {
-            if let Some(body) = solar_system.get_body_by_name("Xenos") {
-                let body_pos = body.get_world_position();
-                let warp_pos = Vector3::new(body_pos.x, body_pos.y + 2.0, body_pos.z + 4.0);
-                camera.warp_to(warp_pos, 1.5);
-                println!("Warping a Xenos (planeta alien con 2 lunas)");
-            }
-        }
+    while window.is_open() && !window.is_key_down(Key::Escape) {
+        // Delta time
+        let current_time = Instant::now();
+        let mut delta_time = current_time.duration_since(last_time).as_secs_f32();
+        last_time = current_time;
 
-        if window.is_key_pressed(KeyboardKey::KEY_R) {
-            show_rings = !show_rings;
-            println!("Anillos: {}", if show_rings { "ON" } else { "OFF" });
-        }
+        // Clamp delta_time to prevent issues when window is paused/minimized
+        // Max 0.1 seconds (10 FPS minimum) to prevent huge jumps
+        delta_time = delta_time.min(0.1);
+        total_time += delta_time;
 
-        if window.is_key_pressed(KeyboardKey::KEY_M) {
-            show_moon = !show_moon;
-            println!("Luna: {}", if show_moon { "ON" } else { "OFF" });
-        }
+        // === INPUT ===
+        handle_input(&window, &mut camera, &mut current_target, &solar_system);
 
-        if window.is_key_pressed(KeyboardKey::KEY_SPACE) {
-            auto_rotate = !auto_rotate;
-            println!("Auto-rotación: {}", if auto_rotate { "ON" } else { "OFF" });
-        }
-
-        camera.process_input(&window);
-        // verificar si aqui es el update loop
-        camera.update_warp(window.get_frame_time());
-
-        // Actualizar el sistema solar
+        // === UPDATE ===
         solar_system.update(delta_time);
 
-        if auto_rotate {
-            rotation_y += 0.01;
+        // Actualizar objetivo de la cámara
+        let target_pos = solar_system.get_body_position(current_target);
+        camera.look_at_target(target_pos);
+
+        // === RENDER ===
+        // Renderizar skybox primero (sin depth buffer)
+        render_skybox(&mut framebuffer, total_time);
+        
+        // Limpiar solo el depth buffer (mantener el skybox)
+        for depth in framebuffer.zbuffer.iter_mut() {
+            *depth = f32::INFINITY;
         }
 
-        framebuffer.clear();
+        // Matriz VP (View-Projection)
+        let vp_matrix = camera.view_projection_matrix();
 
-        let view_matrix = camera.get_view_matrix();
-        let projection_matrix = create_projection_matrix(fov_y, aspect, near, far);
-        let viewport_matrix =
-            create_viewport_matrix(0.0, 0.0, window_width as f32, window_height as f32);
+        // Renderizar órbitas (primero, para que estén detrás)
+        render_orbits(&mut framebuffer, &solar_system, &vp_matrix);
 
-        // === RENDERIZAR SKYBOX ===
-        // El skybox se renderiza primero como fondo
-        let skybox_model = create_model_matrix(
-            camera.target,  // Skybox centered on camera target
-            1.0,
-            Vector3::new(0.0, 0.0, 0.0)
-        );
-
-        let skybox_uniforms = Uniforms {
-            model_matrix: skybox_model,
-            view_matrix,
-            projection_matrix,
-            viewport_matrix,
-            time: elapsed_time,
-            shader_type: ShaderType::Skybox,
-        };
-
-        render(&mut framebuffer, &skybox_uniforms, skybox_vertices, &light);
-
-        // En el render loop, antes de renderizar los planetas:
-        if solar_system.orbit_lines_enabled {
-            let orbit_color = Vector3::new(0.0, 0.8, 1.0); // Cyan brillante
-
-            for body in &solar_system.bodies {
-                if body.orbit_radius > 0.0 {
-                    // No dibujar órbita del sol
-                    let center = body.orbit_center;
-                    let center_raylib = Vector3::new(center.x, center.y, center.z);
-                    draw_orbit_circle(
-                        &mut framebuffer,
-                        center_raylib,
-                        body.orbit_radius,
-                        orbit_color,
-                        64, // Segmentos (más = más suave)
-                        &viewport_matrix,
-                        &view_matrix,
-                        &projection_matrix,
-                    );
-
-                    // También dibujar órbitas de lunas
-                    for moon in &body.satellites {
-                        let pos = body.get_world_position();
-                        let pos_raylib = Vector3::new(pos.x, pos.y, pos.z);
-                        draw_orbit_circle(
-                            &mut framebuffer,
-                            pos_raylib,
-                            moon.orbit_radius,
-                            orbit_color * 0.6, // Más tenue para lunas
-                            32,
-                            &viewport_matrix,
-                            &view_matrix,
-                            &projection_matrix,
-                        );
-                    }
-                }
-            }
-        }
-
-        // === RENDERIZAR SISTEMA SOLAR ===
+        // Renderizar cada cuerpo celeste
         for body in &solar_system.bodies {
             let model_matrix = body.get_model_matrix();
+            let mvp = vp_matrix.multiply(&model_matrix);
 
-            let uniforms = Uniforms {
-                model_matrix,
-                view_matrix,
-                projection_matrix,
-                viewport_matrix,
-                time: elapsed_time,
-                shader_type: body.shader_type,
+            // Dirección de luz hacia este cuerpo (desde el sol)
+            let body_pos = body.get_position();
+            let light_dir = if body.is_emissive {
+                Vec3::zero() // El sol no necesita luz externa
+            } else {
+                (-body_pos).normalize() // Luz viene del centro (sol)
             };
 
-            render(&mut framebuffer, &uniforms, &vertex_array, &light);
+            // Renderizar cada triángulo
+            for triangle in &body.mesh {
+                // Transformar vértices a espacio de clip
+                let transformed = [
+                    transform_vertex_with_local(&triangle[0], &mvp, &model_matrix),
+                    transform_vertex_with_local(&triangle[1], &mvp, &model_matrix),
+                    transform_vertex_with_local(&triangle[2], &mvp, &model_matrix),
+                ];
 
-            // Renderizar anillos si el planeta los tiene
-            if body.has_rings {
-                let body_pos = body.get_world_position();
-                let ring_position = Vector3::new(body_pos.x, body_pos.y, body_pos.z);
-                let ring_rotation = Vector3::new(PI / 4.0, body.rotation_angle.to_radians() * 0.3, 0.0);
-                let ring_scale = body.ring_outer_radius;
-                let ring_model = create_model_matrix(ring_position, ring_scale, ring_rotation);
+                // Back-face culling simple
+                let normal = calculate_face_normal(
+                    &transformed[0].0,
+                    &transformed[1].0,
+                    &transformed[2].0,
+                );
+                if normal.z > 0.0 {
+                    continue; // Cara trasera, no renderizar
+                }
 
-                let ring_uniforms = Uniforms {
-                    model_matrix: ring_model,
-                    view_matrix,
-                    projection_matrix,
-                    viewport_matrix,
-                    time: elapsed_time,
-                    shader_type: ShaderType::Rings,
+                // Frustum culling básico (si todos los vértices están fuera, saltar)
+                if !is_visible(&transformed[0].0)
+                    && !is_visible(&transformed[1].0)
+                    && !is_visible(&transformed[2].0)
+                {
+                    continue;
+                }
+
+                // Rasterizar con shader
+                rasterize_with_shader(
+                    &mut framebuffer,
+                    &transformed,
+                    &[triangle[0].position, triangle[1].position, triangle[2].position],
+                    body.shader_type,
+                    total_time,
+                    &light_dir,
+                );
+            }
+        }
+
+        // Mostrar en ventana
+        window
+            .update_with_buffer(&framebuffer.buffer, WIDTH, HEIGHT)
+            .expect("Error al actualizar ventana");
+    }
+}
+
+/// Maneja el input del usuario
+fn handle_input(
+    window: &Window,
+    camera: &mut Camera,
+    current_target: &mut usize,
+    solar_system: &SolarSystem,
+) {
+    // Zoom
+    if window.is_key_down(Key::W) {
+        camera.set_distance(camera.distance_from_target - 0.5);
+    }
+    if window.is_key_down(Key::S) {
+        camera.set_distance(camera.distance_from_target + 0.5);
+    }
+
+    // Rotación
+    if window.is_key_down(Key::A) {
+        camera.rotate(-0.03);
+    }
+    if window.is_key_down(Key::D) {
+        camera.rotate(0.03);
+    }
+
+    // Cambiar objetivo
+    let keys = [Key::Key1, Key::Key2, Key::Key3, Key::Key4, Key::Key5, Key::Key6];
+    for (i, key) in keys.iter().enumerate() {
+        if window.is_key_pressed(*key, minifb::KeyRepeat::No) {
+            if i < solar_system.body_count() {
+                *current_target = i;
+                // Ajustar distancia según el tamaño del planeta
+                let body = solar_system.get_body(i).unwrap();
+                camera.set_distance(body.radius * 8.0 + 5.0);
+                println!("Siguiendo a: {}", body.name);
+            }
+        }
+    }
+}
+
+/// Transforma un vértice con las matrices MVP
+fn transform_vertex(
+    v: &renderer::Vertex,
+    mvp: &Mat4,
+    model: &Mat4,
+) -> renderer::Vertex {
+    let transformed_pos = mvp.transform_point(&v.position);
+    let transformed_normal = model.transform_direction(&v.normal).normalize();
+    
+    renderer::Vertex::new(transformed_pos, transformed_normal, v.color)
+}
+
+/// Transforma un vértice y retorna (clip_pos, world_normal, local_pos)
+fn transform_vertex_with_local(
+    v: &renderer::Vertex,
+    mvp: &Mat4,
+    model: &Mat4,
+) -> (Vec3, Vec3, Vec3) {
+    let clip_pos = mvp.transform_point(&v.position);
+    let world_normal = model.transform_direction(&v.normal).normalize();
+    (clip_pos, world_normal, v.position)
+}
+
+/// Rasteriza un triángulo aplicando shaders por fragmento
+fn rasterize_with_shader(
+    fb: &mut Framebuffer,
+    transformed: &[(Vec3, Vec3, Vec3); 3], // (clip_pos, world_normal, local_pos)
+    local_positions: &[Vec3; 3],
+    shader_type: ShaderType,
+    time: f32,
+    light_dir: &Vec3,
+) {
+    // Convertir a coordenadas de pantalla
+    let screen = [
+        to_screen(transformed[0].0, fb.width, fb.height),
+        to_screen(transformed[1].0, fb.width, fb.height),
+        to_screen(transformed[2].0, fb.width, fb.height),
+    ];
+
+    // Bounding box
+    let min_x = screen[0].0.min(screen[1].0).min(screen[2].0).max(0) as usize;
+    let max_x = screen[0].0.max(screen[1].0).max(screen[2].0).min(fb.width as i32 - 1) as usize;
+    let min_y = screen[0].1.min(screen[1].1).min(screen[2].1).max(0) as usize;
+    let max_y = screen[0].1.max(screen[1].1).max(screen[2].1).min(fb.height as i32 - 1) as usize;
+
+    // Área del triángulo
+    let area = edge_function(screen[0], screen[1], screen[2]);
+    if area.abs() < 0.001 {
+        return;
+    }
+
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let p = (x as i32, y as i32);
+
+            // Coordenadas baricéntricas
+            let w0 = edge_function(screen[1], screen[2], p);
+            let w1 = edge_function(screen[2], screen[0], p);
+            let w2 = edge_function(screen[0], screen[1], p);
+
+            // Verificar si está dentro del triángulo
+            if (w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0) || (w0 <= 0.0 && w1 <= 0.0 && w2 <= 0.0) {
+                let w0 = w0 / area;
+                let w1 = w1 / area;
+                let w2 = w2 / area;
+
+                // Interpolar Z
+                let z = transformed[0].0.z * w0 + transformed[1].0.z * w1 + transformed[2].0.z * w2;
+
+                // Interpolar normal
+                let normal = Vec3::new(
+                    transformed[0].1.x * w0 + transformed[1].1.x * w1 + transformed[2].1.x * w2,
+                    transformed[0].1.y * w0 + transformed[1].1.y * w1 + transformed[2].1.y * w2,
+                    transformed[0].1.z * w0 + transformed[1].1.z * w1 + transformed[2].1.z * w2,
+                ).normalize();
+
+                // Interpolar posición local (para el shader)
+                let local_pos = Vec3::new(
+                    local_positions[0].x * w0 + local_positions[1].x * w1 + local_positions[2].x * w2,
+                    local_positions[0].y * w0 + local_positions[1].y * w1 + local_positions[2].y * w2,
+                    local_positions[0].z * w0 + local_positions[1].z * w1 + local_positions[2].z * w2,
+                );
+
+                // Normalizar posición para shaders (esperan posiciones en esfera unitaria)
+                let normalized_pos = local_pos.normalize();
+
+                // Crear datos del fragmento
+                let fragment = FragmentData {
+                    position: normalized_pos,
+                    normal,
+                    world_pos: local_pos, // Simplificado
                 };
 
-                render(&mut framebuffer, &ring_uniforms, &vertex_array, &light);
-            }
+                // Aplicar shader
+                let color = apply_shader(shader_type, &fragment, time, light_dir);
+                let color_u32 = rgb_to_u32(
+                    (color.0.clamp(0.0, 1.0) * 255.0) as u8,
+                    (color.1.clamp(0.0, 1.0) * 255.0) as u8,
+                    (color.2.clamp(0.0, 1.0) * 255.0) as u8,
+                );
 
-            // Renderizar satélites (lunas)
-            for satellite in &body.satellites {
-                let satellite_model = satellite.get_model_matrix();
-
-                let satellite_uniforms = Uniforms {
-                    model_matrix: satellite_model,
-                    view_matrix,
-                    projection_matrix,
-                    viewport_matrix,
-                    time: elapsed_time,
-                    shader_type: satellite.shader_type,
-                };
-
-                render(&mut framebuffer, &satellite_uniforms, &vertex_array, &light);
+                fb.set_pixel(x, y, z, color_u32);
             }
         }
+    }
+}
 
-        // === RENDERIZAR ANILLOS (si están activos) ===
-        if show_rings {
-            let ring_translation = Vector3::new(0.0, 0.0, 0.0);
-            let ring_rotation = Vector3::new(PI / 4.0, rotation_y * 0.5, 0.0);
-            let ring_scale = 4.0;
-            let ring_model = create_model_matrix(ring_translation, ring_scale, ring_rotation);
+fn to_screen(pos: Vec3, width: usize, height: usize) -> (i32, i32) {
+    let x = ((pos.x + 1.0) * 0.5 * width as f32) as i32;
+    let y = ((1.0 - pos.y) * 0.5 * height as f32) as i32;
+    (x, y)
+}
 
-            let ring_uniforms = Uniforms {
-                model_matrix: ring_model,
-                view_matrix,
-                projection_matrix,
-                viewport_matrix,
-                time: elapsed_time,
-                shader_type: ShaderType::Rings,
-            };
+fn edge_function(v0: (i32, i32), v1: (i32, i32), p: (i32, i32)) -> f32 {
+    ((p.0 - v0.0) * (v1.1 - v0.1) - (p.1 - v0.1) * (v1.0 - v0.0)) as f32
+}
 
-            render(&mut framebuffer, &ring_uniforms, &vertex_array, &light);
+/// Calcula la normal de una cara (para back-face culling)
+fn calculate_face_normal(v0: &Vec3, v1: &Vec3, v2: &Vec3) -> Vec3 {
+    let edge1 = *v1 - *v0;
+    let edge2 = *v2 - *v0;
+    edge1.cross(&edge2).normalize()
+}
+
+/// Verifica si un punto está en el frustum visible
+fn is_visible(p: &Vec3) -> bool {
+    p.x >= -1.5 && p.x <= 1.5 && p.y >= -1.5 && p.y <= 1.5 && p.z >= 0.0 && p.z <= 1.0
+}
+
+/// Renderiza las órbitas de los planetas
+fn render_orbits(fb: &mut Framebuffer, solar_system: &SolarSystem, vp_matrix: &Mat4) {
+    for (i, orbit) in solar_system.orbit_points.iter().enumerate() {
+        if orbit.is_empty() {
+            continue;
         }
 
-        // === RENDERIZAR LUNA (si está activa) ===
-        if show_moon {
-            let moon_orbit_radius = 5.5;
-            let moon_translation = Vector3::new(
-                moon_orbit_radius * (elapsed_time * 0.5).cos(),
-                0.5 * (elapsed_time * 0.3).sin(),
-                moon_orbit_radius * (elapsed_time * 0.5).sin(),
-            );
-            let moon_model =
-                create_model_matrix(moon_translation, 0.6, Vector3::new(0.0, elapsed_time, 0.0));
+        // Color de órbita basado en el planeta
+        let body = &solar_system.bodies[i];
+        let orbit_color = rgb_to_u32(
+            (body.color.0 * 100.0) as u8,
+            (body.color.1 * 100.0) as u8,
+            (body.color.2 * 100.0) as u8,
+        );
 
-            let moon_uniforms = Uniforms {
-                model_matrix: moon_model,
-                view_matrix,
-                projection_matrix,
-                viewport_matrix,
-                time: elapsed_time,
-                shader_type: ShaderType::Moon,
-            };
+        for j in 0..orbit.len() {
+            let p1 = &orbit[j];
+            let p2 = &orbit[(j + 1) % orbit.len()];
 
-            render(&mut framebuffer, &moon_uniforms, &vertex_array, &light);
+            // Transformar puntos
+            let sp1 = vp_matrix.transform_point(p1);
+            let sp2 = vp_matrix.transform_point(p2);
+
+            // Convertir a coordenadas de pantalla
+            if sp1.z > 0.0 && sp2.z > 0.0 && sp1.z < 1.0 && sp2.z < 1.0 {
+                let x1 = ((sp1.x + 1.0) * 0.5 * fb.width as f32) as i32;
+                let y1 = ((1.0 - sp1.y) * 0.5 * fb.height as f32) as i32;
+                let x2 = ((sp2.x + 1.0) * 0.5 * fb.width as f32) as i32;
+                let y2 = ((1.0 - sp2.y) * 0.5 * fb.height as f32) as i32;
+
+                draw_line(fb, x1, y1, x2, y2, orbit_color);
+            }
         }
-
-        framebuffer.swap_buffers();
-
-        // Single drawing context for both framebuffer texture and UI overlay
-        let mut d = window.begin_drawing(&thread);
-        d.clear_background(Color::BLACK);
-
-        // Draw the framebuffer texture
-        d.draw_texture(framebuffer.get_texture(), 0, 0, Color::WHITE);
-
-        // UI Overlay
-        d.draw_text(
-            "Sistema Solar - Presiona 1-6 para warp",
-            10,
-            10,
-            20,
-            Color::WHITE,
-        );
-        d.draw_text(
-            &format!("Planetas: {} | Cámara: ({:.1}, {:.1}, {:.1})", 
-                solar_system.bodies.len(), camera.eye.x, camera.eye.y, camera.eye.z),
-            10,
-            35,
-            16,
-            Color::LIGHTGRAY,
-        );
-        d.draw_text(
-            "1-6: Cambiar planeta/estrella | SPACE: Pausar",
-            10,
-            580,
-            14,
-            Color::DARKGRAY,
-        );
     }
 }
